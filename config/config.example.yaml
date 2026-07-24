@@ -1,0 +1,23 @@
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+storage:
+  root: "/data/storage"
+  database_path: "/data/mat-mcp.db"
+
+heap_dump:
+  max_size_bytes: 17179869184
+  ttl_seconds: 86400
+  ttl_cleanup_interval_seconds: 300
+
+mat:
+  executable_path: "/opt/mat/ParseHeapDump.sh"
+  max_heap: "8g"
+  index_timeout_seconds: 900
+  query_timeout_seconds: 300
+  max_parallel_queries_per_dump: 2
+  max_result_rows: 1000
+
+sqlite:
+  busy_timeout_ms: 5000
