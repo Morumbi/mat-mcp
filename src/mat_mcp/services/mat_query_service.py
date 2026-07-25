@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from mat_mcp.db.models import HeapDump, MatQuery
@@ -132,14 +132,8 @@ class MatQueryService:
         )
         try:
             with stdout.open("wb") as out, stderr.open("wb") as err:
-                process = await asyncio.create_subprocess_exec(
-                    str(self._executable),
-                    str(self._root / dump.hprof_path),
-                    *self._mat_arguments(operation, data),
-                    cwd=query_dir,
-                    stdout=out,
-                    stderr=err,
-                    env={**os.environ, "JAVA_TOOL_OPTIONS": f"-Xmx{self._max_heap}"},
+                process = await self._start_mat_process(
+                    dump, operation, data, query_dir, out, err
                 )
                 await asyncio.wait_for(process.wait(), self._timeout)
             if process.returncode != 0:
@@ -189,6 +183,55 @@ class MatQueryService:
         )
         await self._queries.add(record)
         return parsed
+
+    async def _start_mat_process(
+        self,
+        dump: HeapDump,
+        operation: str,
+        data: dict[str, object],
+        query_dir: Path,
+        stdout: object,
+        stderr: object,
+    ) -> asyncio.subprocess.Process:
+        """Launch MAT, preserving OQL quotes through the Windows batch launcher."""
+        hprof_path = self._root / dump.hprof_path
+        arguments = self._mat_arguments(operation, data)
+        environment = {**os.environ, "JAVA_TOOL_OPTIONS": f"-Xmx{self._max_heap}"}
+        if os.name == "nt" and self._executable.suffix.lower() == ".bat" and operation in {
+            "oql",
+            "list_objects",
+        }:
+            environment.update(
+                {
+                    "MAT_MCP_MAT_EXECUTABLE": str(self._executable),
+                    "MAT_MCP_MAT_HPROF": str(hprof_path),
+                    "MAT_MCP_MAT_QUERY_COMMAND": arguments[0],
+                }
+            )
+            return await asyncio.create_subprocess_exec(
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    "& $env:MAT_MCP_MAT_EXECUTABLE $env:MAT_MCP_MAT_HPROF "
+                    "$env:MAT_MCP_MAT_QUERY_COMMAND '-format=txt' '-unzip' "
+                    "'org.eclipse.mat.api:query'"
+                ),
+                cwd=query_dir,
+                stdout=cast(Any, stdout),
+                stderr=cast(Any, stderr),
+                env=environment,
+            )
+        return await asyncio.create_subprocess_exec(
+            str(self._executable),
+            str(hprof_path),
+            *arguments,
+            cwd=query_dir,
+            stdout=cast(Any, stdout),
+            stderr=cast(Any, stderr),
+            env=environment,
+        )
 
     async def _read_cache(
         self,
