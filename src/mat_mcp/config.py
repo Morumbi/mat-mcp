@@ -116,6 +116,10 @@ def load_settings(
         raise ValueError("Configuration root must be a mapping")
     _apply_environment_overrides(raw, environment)
     try:
-        return Settings.model_validate(raw)
+        settings = Settings.model_validate(raw)
     except ValidationError as error:
         raise ValueError(f"Invalid configuration: {error}") from error
+    settings.storage.root = settings.storage.root.resolve()
+    settings.storage.database_path = settings.storage.database_path.resolve()
+    settings.mat.executable_path = settings.mat.executable_path.resolve()
+    return settings

@@ -19,7 +19,7 @@ COPY docker-entrypoint.sh ./
 RUN uv sync --frozen --no-dev
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /data/storage /config /opt/mat \
-    && cp -a /app/mat/. /opt/mat/ \
+    && cp -a /app/mat/linux/. /opt/mat/ \
     && chown -R appuser:appuser /app /data
 
 USER appuser

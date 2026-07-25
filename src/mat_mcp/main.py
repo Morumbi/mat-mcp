@@ -12,7 +12,13 @@ from starlette.applications import Starlette
 
 from mat_mcp.api.app import create_asgi_app, create_mcp_server
 from mat_mcp.config import DEFAULT_CONFIG_PATH, Settings, load_settings
+from mat_mcp.db.engine import create_database_engine, create_session_factory
+from mat_mcp.db.repositories import HeapDumpRepository, MatQueryRepository
 from mat_mcp.logging import configure_logging
+from mat_mcp.services.heap_dump_service import HeapDumpService
+from mat_mcp.services.indexing_service import IndexingService
+from mat_mcp.services.mat_query_service import MatQueryService
+from mat_mcp.storage.filesystem import FileStorage
 
 
 def run_migrations(database_path: Path) -> None:
@@ -27,7 +33,27 @@ def run_migrations(database_path: Path) -> None:
 
 def create_application(settings: Settings) -> Starlette:
     """Build the ASGI app after startup validation and migrations."""
-    return create_asgi_app(create_mcp_server())
+    engine = create_database_engine(settings.storage.database_path, settings.sqlite.busy_timeout_ms)
+    repository = HeapDumpRepository(create_session_factory(engine))
+    query_repository = MatQueryRepository(create_session_factory(engine))
+    storage = FileStorage(settings.storage.root, settings.heap_dump.max_size_bytes)
+    indexer = IndexingService(
+        settings.mat.executable_path,
+        settings.mat.max_heap,
+        settings.mat.index_timeout_seconds,
+        repository,
+    )
+    heap_dumps = HeapDumpService(storage, repository, indexer, settings.heap_dump.ttl_seconds)
+    queries = MatQueryService(
+        settings.mat.executable_path,
+        settings.mat.max_heap,
+        settings.mat.query_timeout_seconds,
+        settings.mat.max_result_rows,
+        settings.storage.root,
+        repository,
+        query_repository,
+    )
+    return create_asgi_app(create_mcp_server(heap_dumps, queries), storage)
 
 
 def main() -> None:
