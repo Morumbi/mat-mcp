@@ -73,3 +73,28 @@ async def test_tool_errors_set_mcp_is_error() -> None:
         '{"error":{"code":"invalid_input","message":"Invalid upload.",'
         '"details":{},"retryable":false}}'
     )
+
+
+async def test_query_tool_publishes_operation_specific_input_schema() -> None:
+    server = create_mcp_server(
+        cast(HeapDumpService, object()), cast(MatQueryService, object())
+    )
+    client = Client(server)
+
+    async with client:
+        tools = await client.list_tools()
+
+    tool = next(item for item in tools if item.name == "run_mat_query")
+    properties = tool.inputSchema["properties"]
+    assert properties["operation"]["enum"] == [
+        "histogram",
+        "dominator_tree",
+        "path_to_gc_roots",
+        "leak_suspects",
+        "oql",
+        "list_objects",
+    ]
+    variants = properties["data"]["oneOf"]
+    assert variants[1]["properties"]["object_address"]["pattern"] == "^0x[0-9a-fA-F]+$"
+    assert variants[2]["properties"]["query"]["maxLength"] == 10000
+    assert variants[3]["properties"]["include_subclasses"]["type"] == "boolean"

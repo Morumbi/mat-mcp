@@ -1,10 +1,11 @@
 """ASGI composition for Streamable HTTP MCP and health."""
 
 import json
-from typing import NoReturn
+from typing import Annotated, Literal, NoReturn
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import Field
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 
@@ -14,6 +15,74 @@ from mat_mcp.domain.errors import DomainError
 from mat_mcp.services.heap_dump_service import HeapDumpService
 from mat_mcp.services.mat_query_service import MatQueryService
 from mat_mcp.storage.filesystem import FileStorage
+
+QueryOperation = Literal[
+    "histogram",
+    "dominator_tree",
+    "path_to_gc_roots",
+    "leak_suspects",
+    "oql",
+    "list_objects",
+]
+
+QueryData = Annotated[
+    dict[str, object],
+    Field(
+        description=(
+            "Parameters depend on operation. histogram, dominator_tree, and leak_suspects "
+            "require {}. path_to_gc_roots requires {object_address: '0x...'}. "
+            "oql requires {query: 'SELECT ...'}; only one SELECT expression is allowed. "
+            "list_objects requires {class_name: 'fully.qualified.Class'} and accepts "
+            "optional include_subclasses: boolean."
+        ),
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "title": "No parameters",
+                    "description": "For histogram, dominator_tree, and leak_suspects.",
+                    "type": "object",
+                    "additionalProperties": False,
+                },
+                {
+                    "title": "Path to GC roots",
+                    "description": "For path_to_gc_roots.",
+                    "type": "object",
+                    "properties": {
+                        "object_address": {
+                            "type": "string",
+                            "pattern": "^0x[0-9a-fA-F]+$",
+                            "description": "MAT object address returned by a prior result.",
+                        }
+                    },
+                    "required": ["object_address"],
+                    "additionalProperties": False,
+                },
+                {
+                    "title": "OQL",
+                    "description": "For oql. A single SELECT expression only.",
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 10000}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                {
+                    "title": "List objects",
+                    "description": "For list_objects.",
+                    "type": "object",
+                    "properties": {
+                        "class_name": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*(?:\\[\\])?$",
+                        },
+                        "include_subclasses": {"type": "boolean", "default": False},
+                    },
+                    "required": ["class_name"],
+                    "additionalProperties": False,
+                },
+            ]
+        },
+    ),
+]
 
 
 def raise_tool_error(error: DomainError) -> NoReturn:
@@ -43,7 +112,12 @@ def create_mcp_server(heap_dumps: HeapDumpService, queries: MatQueryService) -> 
 
     @mcp.tool()
     async def run_mat_query(
-        heap_dump_id: str, operation: str, data: dict[str, object]
+        heap_dump_id: Annotated[str, Field(description="ID returned by open_heap_dump")],
+        operation: Annotated[
+            QueryOperation,
+            Field(description="MAT operation. Select the matching data object variant."),
+        ],
+        data: QueryData,
     ) -> dict[str, object]:
         """Run a supported MAT query, report, or object listing."""
         try:
