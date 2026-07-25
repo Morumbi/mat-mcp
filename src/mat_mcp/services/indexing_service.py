@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,18 +31,33 @@ class IndexingService:
         self._max_heap = max_heap
         self._timeout_seconds = timeout_seconds
         self._repository = repository
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
 
     def start(self, dump: HeapDump, workspace: Path) -> None:
         """Schedule indexing without blocking the MCP request handler."""
         task = asyncio.create_task(self._run(dump, workspace), name=f"index-{dump.heap_dump_id}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._tasks[dump.heap_dump_id] = task
+        task.add_done_callback(
+            lambda completed: self._tasks.pop(dump.heap_dump_id, None)
+            if self._tasks.get(dump.heap_dump_id) is completed
+            else None
+        )
+
+    async def stop(self, heap_dump_id: str) -> None:
+        """Cancel active indexing and terminate its MAT process, if any."""
+        task = self._tasks.get(heap_dump_id)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     async def _run(self, dump: HeapDump, workspace: Path) -> None:
         log_dir = workspace / "indexing"
         log_dir.mkdir(exist_ok=True)
         stdout_path, stderr_path = log_dir / "stdout.log", log_dir / "stderr.log"
+        process: asyncio.subprocess.Process | None = None
         try:
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 process = await asyncio.create_subprocess_exec(
@@ -51,6 +67,7 @@ class IndexingService:
                     stderr=stderr,
                     env={**os.environ, "JAVA_TOOL_OPTIONS": f"-Xmx{self._max_heap}"},
                 )
+                self._processes[dump.heap_dump_id] = process
                 await asyncio.wait_for(process.wait(), timeout=self._timeout_seconds)
             if process.returncode != 0:
                 await self._repository.mark_failed(
@@ -59,10 +76,32 @@ class IndexingService:
                 return
             await self._repository.mark_ready(dump.heap_dump_id, utc_now())
         except TimeoutError:
+            await self._terminate_process(process)
             await self._repository.mark_failed(
                 dump.heap_dump_id, "MAT indexing timed out.", utc_now()
             )
+        except asyncio.CancelledError:
+            await self._terminate_process(process)
+            raise
         except Exception:
             await self._repository.mark_failed(
                 dump.heap_dump_id, "MAT indexing could not be started.", utc_now()
             )
+        finally:
+            self._processes.pop(dump.heap_dump_id, None)
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process | None) -> None:
+        if process is None or process.returncode is not None:
+            return
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/PID", str(process.pid), "/T", "/F"
+            )
+            await killer.wait()
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            process.kill()
+            await process.wait()

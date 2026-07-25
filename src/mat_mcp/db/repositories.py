@@ -30,6 +30,16 @@ class HeapDumpRepository:
             session.add(dump)
             await session.commit()
 
+    async def delete_by_id(self, heap_dump_id: str) -> bool:
+        """Delete a dump and its MAT queries through the database cascade."""
+        async with self._sessions() as session:
+            dump = await session.get(HeapDump, heap_dump_id)
+            if dump is None:
+                return False
+            await session.delete(dump)
+            await session.commit()
+            return True
+
     async def mark_ready(self, heap_dump_id: str, updated_at: str) -> None:
         async with self._sessions() as session:
             dump = await session.get(HeapDump, heap_dump_id)

@@ -99,7 +99,20 @@ class FileStorage:
 
     def remove_workspace(self, workspace: Path) -> None:
         """Remove a generated workspace only; caller supplies an internal path."""
-        shutil.rmtree(workspace, ignore_errors=True)
+        resolved = workspace.resolve()
+        if resolved.parent != self._root:
+            raise ValueError("Workspace must be a direct child of storage root.")
+        try:
+            shutil.rmtree(resolved)
+        except FileNotFoundError:
+            return
+
+    def workspace_for(self, storage_path: str) -> Path:
+        """Resolve a database workspace path without allowing traversal outside storage."""
+        workspace = (self._root / storage_path).resolve()
+        if workspace.parent != self._root:
+            raise ValueError("Stored workspace path is outside storage root.")
+        return workspace
 
     def _prepare_dump_sync(self, upload: Upload, workspace: Path) -> PreparedDump:
         _, original_type = self._filename_and_type(upload.filename)

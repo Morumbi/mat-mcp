@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -105,6 +106,26 @@ class HeapDumpService:
                 "retryable": bool(dump.error_retryable),
             }
         return response
+
+    async def close_heap_dump(self, heap_dump_id: str) -> dict[str, object]:
+        """Stop active work and remove a dump workspace and its metadata.
+
+        Missing metadata means an earlier close already completed, so the public
+        operation stays idempotent.
+        """
+        dump = await self._repository.find_by_id(heap_dump_id)
+        if dump is None:
+            return {"heap_dump_id": heap_dump_id, "closed": True, "deleted": True}
+        await self._indexer.stop(heap_dump_id)
+        try:
+            workspace = self._storage.workspace_for(dump.storage_path)
+            await asyncio.to_thread(self._storage.remove_workspace, workspace)
+        except (OSError, ValueError) as error:
+            raise DomainError(
+                "close_failed", "Heap dump resources could not be deleted.", retryable=True
+            ) from error
+        await self._repository.delete_by_id(heap_dump_id)
+        return {"heap_dump_id": heap_dump_id, "closed": True, "deleted": True}
 
     @staticmethod
     def _open_response(dump: HeapDump) -> dict[str, object]:

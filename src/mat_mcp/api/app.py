@@ -111,6 +111,14 @@ def create_mcp_server(heap_dumps: HeapDumpService, queries: MatQueryService) -> 
             raise_tool_error(error)
 
     @mcp.tool()
+    async def close_heap_dump(heap_dump_id: str) -> dict[str, object]:
+        """Stop processing and permanently delete a heap dump and its MAT data."""
+        try:
+            return await heap_dumps.close_heap_dump(heap_dump_id)
+        except DomainError as error:
+            raise_tool_error(error)
+
+    @mcp.tool()
     async def run_mat_query(
         heap_dump_id: Annotated[str, Field(description="ID returned by open_heap_dump")],
         operation: Annotated[

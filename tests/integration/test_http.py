@@ -56,6 +56,9 @@ class ErrorHeapDumpService:
     async def get_status(self, _: str) -> dict[str, object]:
         raise DomainError("heap_dump_not_found", "Heap dump was not found.")
 
+    async def close_heap_dump(self, heap_dump_id: str) -> dict[str, object]:
+        return {"heap_dump_id": heap_dump_id, "closed": True, "deleted": True}
+
 
 async def test_tool_errors_set_mcp_is_error() -> None:
     server = create_mcp_server(
@@ -98,3 +101,15 @@ async def test_query_tool_publishes_operation_specific_input_schema() -> None:
     assert variants[1]["properties"]["object_address"]["pattern"] == "^0x[0-9a-fA-F]+$"
     assert variants[2]["properties"]["query"]["maxLength"] == 10000
     assert variants[3]["properties"]["include_subclasses"]["type"] == "boolean"
+
+
+async def test_close_heap_dump_is_available_over_mcp() -> None:
+    server = create_mcp_server(
+        cast(HeapDumpService, ErrorHeapDumpService()), cast(MatQueryService, object())
+    )
+    client = Client(server)
+
+    async with client:
+        result = await client.call_tool("close_heap_dump", {"heap_dump_id": "hd_closed"})
+
+    assert result.data == {"heap_dump_id": "hd_closed", "closed": True, "deleted": True}
