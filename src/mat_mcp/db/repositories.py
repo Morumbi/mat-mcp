@@ -25,6 +25,16 @@ class HeapDumpRepository:
             )
             return result
 
+    async def find_expired_ids(self, now: str) -> list[str]:
+        """Return heap dumps whose fixed retention deadline has passed."""
+        async with self._sessions() as session:
+            result = await session.scalars(
+                select(HeapDump.heap_dump_id)
+                .where(HeapDump.expires_at <= now)
+                .order_by(HeapDump.expires_at)
+            )
+            return list(result)
+
     async def add(self, dump: HeapDump) -> None:
         async with self._sessions() as session:
             session.add(dump)

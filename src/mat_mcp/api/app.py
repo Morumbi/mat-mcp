@@ -1,6 +1,8 @@
 """ASGI composition for Streamable HTTP MCP and health."""
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Literal, NoReturn
 
 from fastmcp import FastMCP
@@ -14,6 +16,7 @@ from mat_mcp.api.uploads import create_upload_endpoint
 from mat_mcp.domain.errors import DomainError
 from mat_mcp.services.heap_dump_service import HeapDumpService
 from mat_mcp.services.mat_query_service import MatQueryService
+from mat_mcp.services.ttl_cleanup_service import TtlCleanupService
 from mat_mcp.storage.filesystem import FileStorage
 
 QueryOperation = Literal[
@@ -136,14 +139,28 @@ def create_mcp_server(heap_dumps: HeapDumpService, queries: MatQueryService) -> 
     return mcp
 
 
-def create_asgi_app(mcp: FastMCP, storage: FileStorage) -> Starlette:
+def create_asgi_app(
+    mcp: FastMCP, storage: FileStorage, ttl_cleanup: TtlCleanupService | None = None
+) -> Starlette:
     """Expose only Streamable HTTP MCP plus the liveness endpoint."""
     mcp_app = mcp.http_app(path="/mcp")
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        async with mcp_app.lifespan(app):
+            if ttl_cleanup is not None:
+                ttl_cleanup.start()
+            try:
+                yield
+            finally:
+                if ttl_cleanup is not None:
+                    await ttl_cleanup.stop()
+
     return Starlette(
         routes=[
             Route("/health", health),
             Route("/uploads", create_upload_endpoint(storage), methods=["POST"]),
             Mount("/", app=mcp_app),
         ],
-        lifespan=mcp_app.lifespan,
+        lifespan=lifespan,
     )

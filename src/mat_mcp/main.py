@@ -18,6 +18,7 @@ from mat_mcp.logging import configure_logging
 from mat_mcp.services.heap_dump_service import HeapDumpService
 from mat_mcp.services.indexing_service import IndexingService
 from mat_mcp.services.mat_query_service import MatQueryService
+from mat_mcp.services.ttl_cleanup_service import TtlCleanupService
 from mat_mcp.storage.filesystem import FileStorage
 
 
@@ -44,6 +45,9 @@ def create_application(settings: Settings) -> Starlette:
         repository,
     )
     heap_dumps = HeapDumpService(storage, repository, indexer, settings.heap_dump.ttl_seconds)
+    ttl_cleanup = TtlCleanupService(
+        repository, heap_dumps, settings.heap_dump.ttl_cleanup_interval_seconds
+    )
     queries = MatQueryService(
         settings.mat.executable_path,
         settings.mat.max_heap,
@@ -53,7 +57,7 @@ def create_application(settings: Settings) -> Starlette:
         repository,
         query_repository,
     )
-    return create_asgi_app(create_mcp_server(heap_dumps, queries), storage)
+    return create_asgi_app(create_mcp_server(heap_dumps, queries), storage, ttl_cleanup)
 
 
 def main() -> None:
