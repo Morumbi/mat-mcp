@@ -45,7 +45,7 @@ def create_mcp_server(heap_dumps: HeapDumpService, queries: MatQueryService) -> 
     async def run_mat_query(
         heap_dump_id: str, operation: str, data: dict[str, object]
     ) -> dict[str, object]:
-        """Run the currently supported MAT histogram query."""
+        """Run a supported MAT query."""
         try:
             return await queries.run(heap_dump_id, operation, data)
         except DomainError as error:
