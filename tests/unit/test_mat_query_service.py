@@ -63,6 +63,67 @@ def test_dominator_tree_parser_normalizes_top_level_rows(tmp_path: Path) -> None
     ]
 
 
+def test_result_limit_is_hard_capped_at_fifty_rows(tmp_path: Path) -> None:
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        500,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    result = service._tabular_result(
+        "histogram",
+        [{"class_name": f"example.Class{index}"} for index in range(51)],
+        [{"name": "class_name", "type": "string"}],
+    )
+
+    assert len(result["rows"]) == 50
+    assert result["metadata"] == {
+        "total_rows": 51,
+        "returned_rows": 50,
+        "truncated": True,
+        "execution_time_ms": None,
+    }
+
+
+def test_byte_limit_drops_a_complete_row_without_truncating_its_fields(tmp_path: Path) -> None:
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        50,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+        max_result_bytes=300,
+    )
+    result = {
+        "operation": "oql",
+        "columns": [{"name": "value", "type": "string"}],
+        "rows": [{"value": "short"}, {"value": "x" * 1000}],
+        "metadata": {
+            "total_rows": 2,
+            "returned_rows": 2,
+            "truncated": False,
+            "execution_time_ms": 1,
+        },
+    }
+
+    service._apply_byte_limit(result)
+
+    assert result["rows"] == [{"value": "short"}]
+    assert result["metadata"] == {
+        "total_rows": 2,
+        "returned_rows": 1,
+        "truncated": True,
+        "execution_time_ms": 1,
+        "byte_limit_truncated": True,
+    }
+
+
 def test_path_to_gc_roots_parser_keeps_address_relationships(tmp_path: Path) -> None:
     report = tmp_path / "Query_Command2.txt"
     report.write_text(

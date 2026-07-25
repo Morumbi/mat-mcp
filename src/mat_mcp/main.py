@@ -56,6 +56,7 @@ def create_application(settings: Settings) -> Starlette:
         settings.storage.root,
         repository,
         query_repository,
+        settings.mat.max_result_bytes,
     )
     return create_asgi_app(create_mcp_server(heap_dumps, queries), storage, ttl_cleanup)
 

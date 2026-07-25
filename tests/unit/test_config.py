@@ -17,7 +17,8 @@ mat:
   index_timeout_seconds: 90
   query_timeout_seconds: 30
   max_parallel_queries_per_dump: 2
-  max_result_rows: 100
+  max_result_rows: 50
+  max_result_bytes: 262144
 sqlite: {busy_timeout_ms: 5000}
 """,
         encoding="utf-8",
@@ -41,6 +42,19 @@ def test_environment_overrides_yaml(tmp_path: Path) -> None:
     settings = load_settings(config, {"MAT_MCP_SERVER__PORT": "8081"})
 
     assert settings.server.port == 8081
+
+
+def test_result_row_limit_can_be_lowered_but_not_raised(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    write_config(config)
+
+    settings = load_settings(config, {"MAT_MCP_MAT__MAX_RESULT_ROWS": "10"})
+
+    assert settings.mat.max_result_rows == 10
+    with pytest.raises(ValueError, match="Invalid configuration"):
+        load_settings(config, {"MAT_MCP_MAT__MAX_RESULT_ROWS": "51"})
+    with pytest.raises(ValueError, match="Invalid configuration"):
+        load_settings(config, {"MAT_MCP_MAT__MAX_RESULT_BYTES": "262145"})
 
 
 def test_relative_paths_are_resolved_from_working_directory(

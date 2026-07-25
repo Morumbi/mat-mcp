@@ -17,7 +17,8 @@ mat:
   index_timeout_seconds: 900
   query_timeout_seconds: 300
   max_parallel_queries_per_dump: 2
-  max_result_rows: 1000
+  max_result_rows: 50
+  max_result_bytes: 262144
 
 sqlite:
   busy_timeout_ms: 5000

@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 ENV_PREFIX = "MAT_MCP_"
 DEFAULT_CONFIG_PATH = Path("config/config.example.yaml")
+MAX_RESULT_ROWS = 50
+MAX_RESULT_BYTES = 256 * 1024
 
 
 class ServerSettings(BaseModel):
@@ -47,7 +49,18 @@ class MatSettings(BaseModel):
     index_timeout_seconds: int = Field(gt=0)
     query_timeout_seconds: int = Field(gt=0)
     max_parallel_queries_per_dump: int = Field(gt=0)
-    max_result_rows: int = Field(gt=0)
+    max_result_rows: int = Field(
+        default=MAX_RESULT_ROWS,
+        ge=1,
+        le=MAX_RESULT_ROWS,
+        description="Maximum number of normalized rows returned to an MCP client.",
+    )
+    max_result_bytes: int = Field(
+        default=MAX_RESULT_BYTES,
+        ge=1024,
+        le=MAX_RESULT_BYTES,
+        description="Maximum UTF-8 JSON payload size for normalized query results.",
+    )
 
 
 class SqliteSettings(BaseModel):

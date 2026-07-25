@@ -13,6 +13,7 @@ from time import monotonic
 from typing import Any, cast
 from uuid import uuid4
 
+from mat_mcp.config import MAX_RESULT_BYTES, MAX_RESULT_ROWS
 from mat_mcp.db.models import HeapDump, MatQuery
 from mat_mcp.db.repositories import HeapDumpRepository, MatQueryRepository
 from mat_mcp.domain.errors import DomainError
@@ -40,13 +41,15 @@ class MatQueryService:
         root: Path,
         dumps: HeapDumpRepository,
         queries: MatQueryRepository,
+        max_result_bytes: int = MAX_RESULT_BYTES,
     ) -> None:
         self._executable, self._max_heap, self._timeout, self._max_rows = (
             executable.resolve(),
             max_heap,
             timeout,
-            max_rows,
+            min(max_rows, MAX_RESULT_ROWS),
         )
+        self._max_result_bytes = min(max_result_bytes, MAX_RESULT_BYTES)
         self._root, self._dumps, self._queries = root.resolve(), dumps, queries
 
     async def run(
@@ -153,6 +156,7 @@ class MatQueryService:
         metadata = cast(dict[str, object], parsed["metadata"])
         metadata["cache_hit"] = False
         metadata["execution_time_ms"] = int((monotonic() - started) * 1000)
+        self._apply_byte_limit(parsed)
         result_path = query_dir / "result.json"
         await asyncio.to_thread(
             result_path.write_text, json.dumps(parsed, separators=(",", ":")), "utf-8"
@@ -268,6 +272,7 @@ class MatQueryService:
         )
         metadata["cache_hit"] = True
         metadata["execution_time_ms"] = int((monotonic() - started) * 1000)
+        self._apply_byte_limit(result)
         now = utc_now()
         record = MatQuery(
             query_id=query_id,
@@ -306,6 +311,21 @@ class MatQueryService:
     def _safe_storage_path(self, relative_path: str) -> Path | None:
         path = (self._root / relative_path).resolve()
         return path if path.is_relative_to(self._root) else None
+
+    def _apply_byte_limit(self, result: dict[str, object]) -> None:
+        """Drop complete trailing rows until the UTF-8 JSON payload fits the limit."""
+        rows = cast(list[dict[str, object]], result["rows"])
+        metadata = cast(dict[str, object], result["metadata"])
+        while rows and self._serialized_size(result) > self._max_result_bytes:
+            rows.pop()
+        if len(rows) < cast(int, metadata["returned_rows"]):
+            metadata["returned_rows"] = len(rows)
+            metadata["truncated"] = True
+            metadata["byte_limit_truncated"] = True
+
+    @staticmethod
+    def _serialized_size(result: dict[str, object]) -> int:
+        return len(json.dumps(result, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
     def _mat_arguments(self, operation: str, data: dict[str, object]) -> list[str]:
         if operation == "leak_suspects":
