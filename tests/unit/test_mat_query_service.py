@@ -186,3 +186,99 @@ def test_leak_suspects_uses_standard_mat_report(tmp_path: Path) -> None:
         "-unzip",
         "org.eclipse.mat.api:suspects",
     ]
+
+
+def test_oql_parser_normalizes_object_identity_and_numbers(tmp_path: Path) -> None:
+    report = tmp_path / "Query_Command2.txt"
+    report.write_text(
+        "Class Name | Shallow Heap | Retained Heap\n"
+        "------------------------------------------\n"
+        "java.lang.Runtime @ 0x802ec408 | 16 | 1,024\n"
+        "Total: 1 entry | |\n",
+        encoding="utf-8",
+    )
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    result = service._parse_oql(report)
+
+    assert result["columns"] == [
+        {"name": "class_name", "type": "string"},
+        {"name": "shallow_heap", "type": "integer"},
+        {"name": "retained_heap", "type": "integer"},
+    ]
+    assert result["rows"] == [
+        {
+            "class_name": "java.lang.Runtime",
+            "shallow_heap": 16,
+            "retained_heap": 1024,
+            "object_address": "0x802ec408",
+            "object_id": None,
+        }
+    ]
+
+
+def test_oql_uses_a_single_escaped_mat_command_argument(tmp_path: Path) -> None:
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    assert service._mat_command("oql", {"query": "SELECT * FROM java.lang.Runtime"}) == (
+        '-command=oql \\"SELECT * FROM java.lang.Runtime\\"'
+    )
+
+
+def test_list_objects_generates_safe_oql_for_exact_class(tmp_path: Path) -> None:
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    assert service._mat_command("list_objects", {"class_name": "java.lang.String"}) == (
+        '-command=oql \\"SELECT * FROM java.lang.String\\"'
+    )
+    assert service._mat_command(
+        "list_objects", {"class_name": "java.lang.Number", "include_subclasses": True}
+    ) == '-command=oql \\"SELECT * FROM INSTANCEOF java.lang.Number\\"'
+
+
+def test_list_objects_parser_reuses_oql_normalization(tmp_path: Path) -> None:
+    report = tmp_path / "Query_Command2.txt"
+    report.write_text(
+        "Class Name | Shallow Heap | Retained Heap\n"
+        "------------------------------------------\n"
+        "java.lang.Runtime @ 0x802ec408 | 16 | 16\n",
+        encoding="utf-8",
+    )
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    result = service._parse_list_objects(report)
+
+    assert result["operation"] == "list_objects"
+    assert result["rows"][0]["object_address"] == "0x802ec408"

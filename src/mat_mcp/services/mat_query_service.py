@@ -26,6 +26,8 @@ class MatQueryService:
         "dominator_tree": lambda service, path: service._parse_dominator_tree(path),
         "path_to_gc_roots": lambda service, path: service._parse_path_to_gc_roots(path),
         "leak_suspects": lambda service, path: service._parse_leak_suspects(path),
+        "oql": lambda service, path: service._parse_oql(path),
+        "list_objects": lambda service, path: service._parse_list_objects(path),
     }
 
     def __init__(
@@ -52,7 +54,7 @@ class MatQueryService:
         if operation not in self._PARSERS:
             raise DomainError(
                 "invalid_input",
-                "Only histogram, dominator_tree, and path_to_gc_roots are available.",
+                "Only histogram, dominator_tree, path_to_gc_roots, leak_suspects, oql, and list_objects are available.",
             )
         if operation in {"histogram", "dominator_tree", "leak_suspects"} and data:
             raise DomainError("invalid_input", f"{operation} requires an empty data object.")
@@ -67,6 +69,31 @@ class MatQueryService:
                 raise DomainError(
                     "invalid_input", "data.object_address must be a hexadecimal MAT address."
                 )
+        if operation == "oql":
+            query = data.get("query")
+            if set(data) != {"query"} or not isinstance(query, str):
+                raise DomainError("invalid_input", "oql requires only data.query.")
+            if not query.strip() or len(query) > 10_000:
+                raise DomainError("invalid_input", "data.query must contain at most 10,000 characters.")
+            if (
+                re.match(r"^\s*select\b", query, flags=re.IGNORECASE) is None
+                or re.search(r"[\x00\r\n;]", query) is not None
+                or "-command" in query.lower()
+            ):
+                raise DomainError(
+                    "invalid_input", "data.query must be one single SELECT OQL expression."
+                )
+        if operation == "list_objects":
+            class_name = data.get("class_name")
+            include_subclasses = data.get("include_subclasses", False)
+            if set(data) - {"class_name", "include_subclasses"}:
+                raise DomainError("invalid_input", "list_objects accepts class_name and include_subclasses only.")
+            if not isinstance(class_name, str) or not re.fullmatch(
+                r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\[\])?", class_name
+            ):
+                raise DomainError("invalid_input", "data.class_name must be a Java class name.")
+            if not isinstance(include_subclasses, bool):
+                raise DomainError("invalid_input", "data.include_subclasses must be a boolean.")
         dump = await self._dumps.find_by_id(heap_dump_id)
         if dump is None:
             raise DomainError("heap_dump_not_found", "Heap dump was not found.")
@@ -159,7 +186,25 @@ class MatQueryService:
     def _mat_command(self, operation: str, data: dict[str, object]) -> str:
         if operation == "path_to_gc_roots":
             return f"-command=path2gc {data['object_address']}"
+        if operation == "oql":
+            query = cast(str, data["query"])
+            return f'-command=oql \\"{self._escape_oql(query)}\\"'
+        if operation == "list_objects":
+            prefix = "INSTANCEOF " if data.get("include_subclasses", False) else ""
+            query = f"SELECT * FROM {prefix}{data['class_name']}"
+            return f'-command=oql \\"{self._escape_oql(query)}\\"'
         return f"-command={operation}"
+
+    def _escape_oql(self, query: str) -> str:
+        """Escape an OQL expression for MAT's Windows batch launcher.
+
+        Backslash-escaped outer quotes keep the whole expression in one MAT
+        command argument. Embedded double quotes need the escaping documented
+        by Eclipse MAT for ``ParseHeapDump.bat``.
+        """
+        if self._executable.suffix.lower() != ".bat":
+            return query.replace('"', r'\"')
+        return query.replace("\\", "\\\\").replace('"', "\\\\\\\\\\\\\\\"")
 
     def _report_path(self, dump: HeapDump, operation: str) -> Path:
         report_root = (self._root / dump.hprof_path).parent
@@ -316,6 +361,56 @@ class MatQueryService:
                 {"name": "description", "type": "string"},
             ],
         )
+
+    def _parse_oql(self, path: Path) -> dict[str, object]:
+        """Parse MAT's text table while preserving OQL-selected values."""
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) < 2 or "|" not in lines[0]:
+            return self._tabular_result("oql", [], [])
+        source_columns = [part.strip() for part in lines[0].split("|")]
+        names = [self._column_name(column) for column in source_columns]
+        rows: list[dict[str, object]] = []
+        for line in lines[2:]:
+            if not line.strip() or line.startswith("Total:") or "|" not in line:
+                continue
+            values = [part.strip() for part in line.split("|")]
+            if len(values) != len(names):
+                continue
+            row = {name: self._value(value) for name, value in zip(names, values, strict=True)}
+            class_name = row.get("class_name")
+            if isinstance(class_name, str):
+                identity = re.match(r"^(.*?)\s*@\s*(0x[0-9a-fA-F]+)$", class_name)
+                if identity is not None:
+                    row["class_name"] = identity.group(1).strip()
+                    row["object_address"] = identity.group(2)
+                    row["object_id"] = None
+            rows.append(row)
+        columns = [
+            {
+                "name": name,
+                "type": (
+                    "integer"
+                    if rows and all(isinstance(row.get(name), int) for row in rows)
+                    else "string"
+                ),
+            }
+            for name in names
+        ]
+        return self._tabular_result("oql", rows, columns)
+
+    def _parse_list_objects(self, path: Path) -> dict[str, object]:
+        result = self._parse_oql(path)
+        result["operation"] = "list_objects"
+        return result
+
+    def _column_name(self, label: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        return normalized or "value"
+
+    def _value(self, value: str) -> object:
+        if re.fullmatch(r"[\d,]+", value):
+            return int(value.replace(",", ""))
+        return value
 
     def _path_row(
         self,
