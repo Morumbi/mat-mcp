@@ -133,3 +133,56 @@ def test_path_to_gc_roots_uses_mat_path2gc_command(tmp_path: Path) -> None:
     assert service._mat_command("path_to_gc_roots", {"object_address": "0x800fe988"}) == (
         "-command=path2gc 0x800fe988"
     )
+
+
+def test_leak_suspects_parser_normalizes_mat_description(tmp_path: Path) -> None:
+    pages = tmp_path / "report" / "pages"
+    pages.mkdir(parents=True)
+    (pages / "Description18.txt").write_text(
+        'One instance of "com.example.Cache" loaded by "app.Loader @ 0x1" '
+        "occupies 103,047,536 (18.33%) bytes. The retained objects need inspection.",
+        encoding="utf-8",
+    )
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    result = service._parse_leak_suspects(tmp_path / "report")
+
+    assert result["operation"] == "leak_suspects"
+    assert result["rows"] == [
+        {
+            "suspect_id": "suspect_1",
+            "class_name": "com.example.Cache",
+            "retained_heap": 103047536,
+            "retained_percent": 18.33,
+            "description": (
+                'One instance of "com.example.Cache" loaded by "app.Loader @ 0x1" '
+                "occupies 103,047,536 (18.33%) bytes. The retained objects need inspection."
+            ),
+        }
+    ]
+
+
+def test_leak_suspects_uses_standard_mat_report(tmp_path: Path) -> None:
+    service = MatQueryService(
+        tmp_path / "ParseHeapDump.bat",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, object()),
+        cast(MatQueryRepository, object()),
+    )
+
+    assert service._mat_arguments("leak_suspects", {}) == [
+        "-format=txt",
+        "-unzip",
+        "org.eclipse.mat.api:suspects",
+    ]

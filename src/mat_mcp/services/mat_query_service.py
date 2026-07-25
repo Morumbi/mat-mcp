@@ -25,6 +25,7 @@ class MatQueryService:
         "histogram": lambda service, path: service._parse_histogram(path),
         "dominator_tree": lambda service, path: service._parse_dominator_tree(path),
         "path_to_gc_roots": lambda service, path: service._parse_path_to_gc_roots(path),
+        "leak_suspects": lambda service, path: service._parse_leak_suspects(path),
     }
 
     def __init__(
@@ -53,7 +54,7 @@ class MatQueryService:
                 "invalid_input",
                 "Only histogram, dominator_tree, and path_to_gc_roots are available.",
             )
-        if operation in {"histogram", "dominator_tree"} and data:
+        if operation in {"histogram", "dominator_tree", "leak_suspects"} and data:
             raise DomainError("invalid_input", f"{operation} requires an empty data object.")
         if operation == "path_to_gc_roots":
             address = data.get("object_address")
@@ -96,10 +97,7 @@ class MatQueryService:
                 process = await asyncio.create_subprocess_exec(
                     str(self._executable),
                     str(self._root / dump.hprof_path),
-                    self._mat_command(operation, data),
-                    "-format=txt",
-                    "-unzip",
-                    "org.eclipse.mat.api:query",
+                    *self._mat_arguments(operation, data),
                     cwd=query_dir,
                     stdout=out,
                     stderr=err,
@@ -108,14 +106,9 @@ class MatQueryService:
                 await asyncio.wait_for(process.wait(), self._timeout)
             if process.returncode != 0:
                 raise DomainError("query_failed", f"MAT {operation} query failed.")
-            text_path = (
-                (self._root / dump.hprof_path).parent
-                / "heap_Query"
-                / "pages"
-                / "Query_Command2.txt"
-            )
+            raw_path = self._report_path(dump, operation)
             parser = self._PARSERS[operation]
-            parsed = await asyncio.to_thread(parser, self, text_path)
+            parsed = await asyncio.to_thread(parser, self, raw_path)
         except TimeoutError as error:
             raise DomainError(
                 "query_failed", f"MAT {operation} query timed out.", retryable=True
@@ -144,7 +137,7 @@ class MatQueryService:
             request_path=self._relative(request_path),
             stdout_path=self._relative(stdout),
             stderr_path=self._relative(stderr),
-            raw_result_path=self._relative(text_path),
+            raw_result_path=self._relative(raw_path),
             result_path=self._relative(result_path),
             total_rows=cast(int, metadata["total_rows"]),
             returned_rows=cast(int, metadata["returned_rows"]),
@@ -158,10 +151,21 @@ class MatQueryService:
         await self._queries.add(record)
         return parsed
 
+    def _mat_arguments(self, operation: str, data: dict[str, object]) -> list[str]:
+        if operation == "leak_suspects":
+            return ["-format=txt", "-unzip", "org.eclipse.mat.api:suspects"]
+        return [self._mat_command(operation, data), "-format=txt", "-unzip", "org.eclipse.mat.api:query"]
+
     def _mat_command(self, operation: str, data: dict[str, object]) -> str:
         if operation == "path_to_gc_roots":
             return f"-command=path2gc {data['object_address']}"
         return f"-command={operation}"
+
+    def _report_path(self, dump: HeapDump, operation: str) -> Path:
+        report_root = (self._root / dump.hprof_path).parent
+        if operation == "leak_suspects":
+            return report_root / "heap_Leak_Suspects"
+        return report_root / "heap_Query" / "pages" / "Query_Command2.txt"
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self._root).as_posix()
@@ -273,6 +277,43 @@ class MatQueryService:
                 {"name": "depth", "type": "integer"},
                 {"name": "shallow_heap", "type": "integer", "unit": "bytes"},
                 {"name": "retained_heap", "type": "integer", "unit": "bytes"},
+            ],
+        )
+
+    def _parse_leak_suspects(self, report_dir: Path) -> dict[str, object]:
+        """Extract one normalized row from every MAT problem-suspect description."""
+        rows: list[dict[str, object]] = []
+        for index, description_path in enumerate(
+            sorted((report_dir / "pages").glob("Description*.txt")), start=1
+        ):
+            text = description_path.read_text(encoding="utf-8")
+            summary = re.sub(r"\s+", " ", text).strip()
+            class_match = re.search(r'One instance of "([^"]+)"', summary)
+            heap_match = re.search(r"occupies ([\d,]+) \(([\d.]+)%\) bytes", summary)
+            rows.append(
+                {
+                    "suspect_id": f"suspect_{index}",
+                    "class_name": class_match.group(1) if class_match is not None else None,
+                    "retained_heap": (
+                        int(heap_match.group(1).replace(",", ""))
+                        if heap_match is not None
+                        else None
+                    ),
+                    "retained_percent": (
+                        float(heap_match.group(2)) if heap_match is not None else None
+                    ),
+                    "description": summary,
+                }
+            )
+        return self._tabular_result(
+            "leak_suspects",
+            rows,
+            [
+                {"name": "suspect_id", "type": "string"},
+                {"name": "class_name", "type": "string"},
+                {"name": "retained_heap", "type": "integer", "unit": "bytes"},
+                {"name": "retained_percent", "type": "number", "unit": "percent"},
+                {"name": "description", "type": "string"},
             ],
         )
 
