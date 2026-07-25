@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -101,10 +102,20 @@ class MatQueryService:
             raise DomainError(
                 "heap_dump_not_ready", "Heap dump indexing is not complete.", retryable=True
             )
-        return await self._execute(dump, operation, data)
+        request_data = self._canonical_json(data)
+        request_hash = self._request_hash(dump.heap_dump_id, operation, request_data)
+        cached = await self._read_cache(dump, operation, data, request_data, request_hash)
+        if cached is not None:
+            return cached
+        return await self._execute(dump, operation, data, request_data, request_hash)
 
     async def _execute(
-        self, dump: HeapDump, operation: str, data: dict[str, object]
+        self,
+        dump: HeapDump,
+        operation: str,
+        data: dict[str, object],
+        request_data: str,
+        request_hash: str,
     ) -> dict[str, object]:
         query_id, started = f"qry_{uuid4().hex}", monotonic()
         workspace = self._root / dump.storage_path
@@ -146,6 +157,7 @@ class MatQueryService:
             ) from error
 
         metadata = cast(dict[str, object], parsed["metadata"])
+        metadata["cache_hit"] = False
         metadata["execution_time_ms"] = int((monotonic() - started) * 1000)
         result_path = query_dir / "result.json"
         await asyncio.to_thread(
@@ -156,8 +168,8 @@ class MatQueryService:
             query_id=query_id,
             heap_dump_id=dump.heap_dump_id,
             operation=operation,
-            request_data_json=json.dumps(data, separators=(",", ":")),
-            request_hash=json.dumps(request, sort_keys=True, separators=(",", ":")),
+            request_data_json=request_data,
+            request_hash=request_hash,
             status="completed",
             cache_hit=0,
             query_directory_path=self._relative(query_dir),
@@ -177,6 +189,80 @@ class MatQueryService:
         )
         await self._queries.add(record)
         return parsed
+
+    async def _read_cache(
+        self,
+        dump: HeapDump,
+        operation: str,
+        data: dict[str, object],
+        request_data: str,
+        request_hash: str,
+    ) -> dict[str, object] | None:
+        cached = await self._queries.find_latest_completed(dump.heap_dump_id, request_hash)
+        if cached is None or cached.result_path is None:
+            return None
+        result_path = self._safe_storage_path(cached.result_path)
+        if result_path is None or not result_path.is_file():
+            return None
+        try:
+            result = await asyncio.to_thread(json.loads, result_path.read_text(encoding="utf-8"))
+            if not isinstance(result, dict):
+                return None
+            metadata = result.get("metadata")
+            if not isinstance(metadata, dict):
+                return None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        started, query_id = monotonic(), f"qry_{uuid4().hex}"
+        workspace = self._root / dump.storage_path
+        query_dir = workspace / "queries" / query_id
+        await asyncio.to_thread(query_dir.mkdir, parents=True)
+        request_path = query_dir / "request.json"
+        request = {"heap_dump_id": dump.heap_dump_id, "operation": operation, "data": data}
+        await asyncio.to_thread(
+            request_path.write_text, json.dumps(request, separators=(",", ":")), "utf-8"
+        )
+        metadata["cache_hit"] = True
+        metadata["execution_time_ms"] = int((monotonic() - started) * 1000)
+        now = utc_now()
+        record = MatQuery(
+            query_id=query_id,
+            heap_dump_id=dump.heap_dump_id,
+            operation=operation,
+            request_data_json=request_data,
+            request_hash=request_hash,
+            status="completed",
+            cache_hit=1,
+            cached_query_id=cached.query_id,
+            query_directory_path=self._relative(query_dir),
+            request_path=self._relative(request_path),
+            stdout_path=None,
+            stderr_path=None,
+            raw_result_path=None,
+            result_path=cached.result_path,
+            total_rows=cast(int | None, metadata.get("total_rows")),
+            returned_rows=cast(int | None, metadata.get("returned_rows")),
+            truncated=int(cast(bool, metadata.get("truncated", False))),
+            duration_ms=cast(int, metadata["execution_time_ms"]),
+            created_at=now,
+            started_at=None,
+            completed_at=now,
+            updated_at=now,
+        )
+        await self._queries.add(record)
+        return result
+
+    def _canonical_json(self, data: dict[str, object]) -> str:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+    def _request_hash(self, heap_dump_id: str, operation: str, request_data: str) -> str:
+        material = f"{heap_dump_id}\n{operation}\n{request_data}".encode()
+        return hashlib.sha256(material).hexdigest()
+
+    def _safe_storage_path(self, relative_path: str) -> Path | None:
+        path = (self._root / relative_path).resolve()
+        return path if path.is_relative_to(self._root) else None
 
     def _mat_arguments(self, operation: str, data: dict[str, object]) -> list[str]:
         if operation == "leak_suspects":

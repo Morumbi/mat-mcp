@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from typing import cast
+
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mat_mcp.db.models import HeapDump, MatQuery
@@ -89,3 +91,21 @@ class MatQueryRepository:
         async with self._sessions() as session:
             session.add(query)
             await session.commit()
+
+    async def find_latest_completed(
+        self, heap_dump_id: str, request_hash: str
+    ) -> MatQuery | None:
+        """Return the newest completed query candidate for a cache lookup."""
+        async with self._sessions() as session:
+            query = (
+                select(MatQuery)
+                .where(
+                    MatQuery.heap_dump_id == heap_dump_id,
+                    MatQuery.request_hash == request_hash,
+                    MatQuery.status == "completed",
+                    MatQuery.result_path.is_not(None),
+                    MatQuery.cache_hit == 0,
+                )
+                .order_by(desc(MatQuery.completed_at))
+            )
+            return cast(MatQuery | None, await session.scalar(query))

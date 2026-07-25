@@ -1,8 +1,25 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 from mat_mcp.db.repositories import HeapDumpRepository, MatQueryRepository
 from mat_mcp.services.mat_query_service import MatQueryService
+
+
+class CacheRepository:
+    def __init__(self, dump: object, cached: object) -> None:
+        self.dump = dump
+        self.cached = cached
+        self.records: list[object] = []
+
+    async def find_by_id(self, _: str) -> object:
+        return self.dump
+
+    async def find_latest_completed(self, _: str, __: str) -> object:
+        return self.cached
+
+    async def add(self, query: object) -> None:
+        self.records.append(query)
 
 
 def test_dominator_tree_parser_normalizes_top_level_rows(tmp_path: Path) -> None:
@@ -282,3 +299,42 @@ def test_list_objects_parser_reuses_oql_normalization(tmp_path: Path) -> None:
 
     assert result["operation"] == "list_objects"
     assert result["rows"][0]["object_address"] == "0x802ec408"
+
+
+async def test_completed_query_result_is_reused_from_cache(tmp_path: Path) -> None:
+    workspace = tmp_path / "hd_cached"
+    result_path = workspace / "queries" / "qry_source" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        '{"operation":"histogram","columns":[],"rows":[],"metadata":'
+        '{"total_rows":0,"returned_rows":0,"truncated":false,"execution_time_ms":123}}',
+        encoding="utf-8",
+    )
+    dump = SimpleNamespace(heap_dump_id="hd_cached", status="ready", storage_path="hd_cached")
+    source = SimpleNamespace(
+        query_id="qry_source", result_path="hd_cached/queries/qry_source/result.json"
+    )
+    repository = CacheRepository(dump, source)
+    service = MatQueryService(
+        tmp_path / "missing-mat-executable",
+        "1g",
+        10,
+        100,
+        tmp_path,
+        cast(HeapDumpRepository, repository),
+        cast(MatQueryRepository, repository),
+    )
+
+    result = await service.run("hd_cached", "histogram", {})
+
+    metadata = cast(dict[str, object], result["metadata"])
+    assert metadata["total_rows"] == 0
+    assert metadata["returned_rows"] == 0
+    assert metadata["truncated"] is False
+    assert metadata["cache_hit"] is True
+    assert isinstance(metadata["execution_time_ms"], int)
+    assert len(repository.records) == 1
+    record = repository.records[0]
+    assert record.cache_hit == 1
+    assert record.cached_query_id == "qry_source"
+    assert record.result_path == "hd_cached/queries/qry_source/result.json"
