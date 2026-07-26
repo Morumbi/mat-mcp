@@ -42,6 +42,26 @@ class HeapDumpRepository:
             session.add(dump)
             await session.commit()
 
+    async def update_prepared(
+        self,
+        heap_dump_id: str,
+        content_sha256: str,
+        uncompressed_size: int,
+        updated_at: str,
+    ) -> bool:
+        """Store the hash and final size after background file preparation."""
+        async with self._sessions() as session:
+            dump = await session.get(HeapDump, heap_dump_id)
+            if dump is None:
+                return False
+            dump.content_sha256 = content_sha256
+            dump.uncompressed_size_bytes = uncompressed_size
+            dump.updated_at = updated_at
+            dump.index_progress = 0
+            dump.index_stage = "Waiting for MAT indexing"
+            await session.commit()
+            return True
+
     async def delete_by_id(self, heap_dump_id: str) -> bool:
         """Delete a dump and its MAT queries through the database cascade."""
         async with self._sessions() as session:

@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
-
-from sqlalchemy.exc import IntegrityError
 
 from mat_mcp.db.models import HeapDump
 from mat_mcp.db.repositories import HeapDumpRepository
 from mat_mcp.domain.errors import DomainError
 from mat_mcp.services.indexing_service import IndexingService, utc_now
-from mat_mcp.storage.filesystem import FileStorage
+from mat_mcp.storage.filesystem import FileStorage, Upload
+
+logger = logging.getLogger("mat_mcp")
 
 
 class HeapDumpService:
@@ -29,56 +31,79 @@ class HeapDumpService:
         self._repository = repository
         self._indexer = indexer
         self._ttl_seconds = ttl_seconds
+        self._preparation_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def open_heap_dump(self, upload_id: str) -> dict[str, object]:
-        """Consume an upload and return promptly after scheduling MAT indexing."""
+        """Consume an upload and schedule preparation independently of the client request."""
         heap_dump_id = f"hd_{uuid4().hex}"
-        prepared = await self._storage.prepare_dump(upload_id, heap_dump_id)
-        existing = await self._repository.find_by_hash(prepared.content_sha256)
-        if existing is not None:
-            self._storage.remove_workspace(prepared.workspace)
-            return self._open_response(existing)
+        upload = self._storage.claim_upload(upload_id)
         now = utc_now()
         expires = (
             (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=self._ttl_seconds))
             .isoformat()
             .replace("+00:00", "Z")
         )
-        root = prepared.workspace.parent
         dump = HeapDump(
             heap_dump_id=heap_dump_id,
-            content_sha256=prepared.content_sha256,
+            content_sha256=f"preparing:{heap_dump_id}",
             status="indexing",
-            filename=prepared.filename,
-            original_type=prepared.original_type,
+            filename=upload.filename,
+            original_type=upload.original_type,
             content_type="hprof",
-            source_size_bytes=prepared.source_size,
-            uncompressed_size_bytes=prepared.uncompressed_size,
-            storage_path=prepared.workspace.relative_to(root).as_posix(),
-            hprof_path=prepared.hprof_path.relative_to(root).as_posix(),
-            index_path=(prepared.workspace / "indexes").relative_to(root).as_posix(),
-            index_stdout_path=(prepared.workspace / "indexing" / "stdout.log")
-            .relative_to(root)
-            .as_posix(),
-            index_stderr_path=(prepared.workspace / "indexing" / "stderr.log")
-            .relative_to(root)
-            .as_posix(),
+            source_size_bytes=upload.size,
+            uncompressed_size_bytes=0,
+            storage_path=heap_dump_id,
+            hprof_path=f"{heap_dump_id}/heap/heap.hprof",
+            index_path=f"{heap_dump_id}/indexes",
+            index_stdout_path=f"{heap_dump_id}/indexing/stdout.log",
+            index_stderr_path=f"{heap_dump_id}/indexing/stderr.log",
             index_progress=0,
-            index_stage="Waiting for MAT indexing",
+            index_stage="Preparing heap dump",
             created_at=now,
             updated_at=now,
             expires_at=expires,
         )
-        try:
-            await self._repository.add(dump)
-        except IntegrityError:
-            self._storage.remove_workspace(prepared.workspace)
-            existing = await self._repository.find_by_hash(prepared.content_sha256)
-            if existing is None:
-                raise
-            return self._open_response(existing)
-        self._indexer.start(dump, prepared.workspace)
+        await self._repository.add(dump)
+        task = asyncio.create_task(
+            self._prepare_and_start(dump, upload), name=f"prepare-{heap_dump_id}"
+        )
+        self._preparation_tasks[heap_dump_id] = task
+        task.add_done_callback(
+            lambda completed: self._preparation_tasks.pop(heap_dump_id, None)
+            if self._preparation_tasks.get(heap_dump_id) is completed
+            else None
+        )
         return self._open_response(dump)
+
+    async def _prepare_and_start(self, dump: HeapDump, upload: Upload) -> None:
+        """Finish file preparation after the MCP response has already been returned."""
+        try:
+            prepared = await self._storage.prepare_claimed_upload(upload, dump.heap_dump_id)
+            existing = await self._repository.find_by_hash(prepared.content_sha256)
+            if existing is not None and existing.heap_dump_id != dump.heap_dump_id:
+                self._storage.remove_workspace(prepared.workspace)
+                await self._repository.mark_failed(
+                    dump.heap_dump_id, "An identical heap dump is already open.", utc_now()
+                )
+                return
+            saved = await self._repository.update_prepared(
+                dump.heap_dump_id,
+                prepared.content_sha256,
+                prepared.uncompressed_size,
+                utc_now(),
+            )
+            if saved:
+                dump.content_sha256 = prepared.content_sha256
+                dump.uncompressed_size_bytes = prepared.uncompressed_size
+                dump.index_stage = "Waiting for MAT indexing"
+                self._indexer.start(dump, prepared.workspace)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Heap dump preparation failed for %s", dump.heap_dump_id)
+            await self._repository.mark_failed(
+                dump.heap_dump_id, "Heap dump preparation failed.", utc_now()
+            )
 
     async def get_status(self, heap_dump_id: str) -> dict[str, object]:
         """Return the stable public indexing state."""
@@ -116,6 +141,11 @@ class HeapDumpService:
         dump = await self._repository.find_by_id(heap_dump_id)
         if dump is None:
             return {"heap_dump_id": heap_dump_id, "closed": True, "deleted": True}
+        task = self._preparation_tasks.pop(heap_dump_id, None)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         await self._indexer.stop(heap_dump_id)
         try:
             workspace = self._storage.workspace_for(dump.storage_path)

@@ -1,3 +1,5 @@
+import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +14,14 @@ async def chunks(value: bytes):
     yield value
 
 
+async def wait_until(predicate: Callable[[], bool]) -> None:
+    for _ in range(100):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("Background preparation did not finish in time.")
+
+
 class FakeRepository:
     def __init__(self) -> None:
         self.dump: HeapDump | None = None
@@ -21,6 +31,15 @@ class FakeRepository:
 
     async def add(self, dump: HeapDump) -> None:
         self.dump = dump
+
+    async def update_prepared(
+        self, _: str, content_sha256: str, uncompressed_size: int, __: str
+    ) -> bool:
+        assert self.dump is not None
+        self.dump.content_sha256 = content_sha256
+        self.dump.uncompressed_size_bytes = uncompressed_size
+        self.dump.index_stage = "Waiting for MAT indexing"
+        return True
 
     async def find_by_id(self, _: str) -> HeapDump | None:
         return self.dump
@@ -56,10 +75,11 @@ async def test_open_starts_indexing_and_exposes_status(tmp_path: Path) -> None:
     )
 
     opened = await service.open_heap_dump(upload.upload_id)
+    await wait_until(lambda: indexer.started)
     status = await service.get_status(cast(str, opened["heap_dump_id"]))
 
     assert opened["status"] == "indexing"
-    assert status["stage"] == "Waiting for MAT indexing"
+    assert status["stage"] in {"Preparing heap dump", "Waiting for MAT indexing"}
     assert indexer.started
 
 
@@ -76,6 +96,7 @@ async def test_close_removes_workspace_metadata_and_is_idempotent(tmp_path: Path
     )
     opened = await service.open_heap_dump(upload.upload_id)
     heap_dump_id = cast(str, opened["heap_dump_id"])
+    await wait_until(lambda: (tmp_path / heap_dump_id).exists())
     assert (tmp_path / heap_dump_id).exists()
 
     closed = await service.close_heap_dump(heap_dump_id)

@@ -25,6 +25,7 @@ class Upload:
 
     upload_id: str
     filename: str
+    original_type: str
     path: Path
     size: int
 
@@ -65,7 +66,7 @@ class FileStorage:
 
     async def store_upload(self, filename: str, chunks: AsyncIterable[bytes]) -> Upload:
         """Stream an HTTP request body to a one-time temporary upload file."""
-        safe_name, _ = self._filename_and_type(filename)
+        safe_name, original_type = self._filename_and_type(filename)
         await asyncio.to_thread(self._uploads.mkdir, parents=True, exist_ok=True)
         upload_id = f"upl_{uuid4().hex}"
         path = self._uploads / upload_id
@@ -82,15 +83,24 @@ class FileStorage:
         except Exception:
             await asyncio.to_thread(path.unlink, missing_ok=True)
             raise
-        upload = Upload(upload_id, safe_name, path, size)
+        upload = Upload(upload_id, safe_name, original_type, path, size)
         self._pending[upload_id] = upload
+        return upload
+
+    def claim_upload(self, upload_id: str) -> Upload:
+        """Consume an upload so a background preparation job can own it."""
+        upload = self._pending.pop(upload_id, None)
+        if upload is None:
+            raise DomainError("invalid_input", "Upload was not found or has already been consumed.")
         return upload
 
     async def prepare_dump(self, upload_id: str, heap_dump_id: str) -> PreparedDump:
         """Consume, validate, and unpack an uploaded heap dump into its workspace."""
-        upload = self._pending.pop(upload_id, None)
-        if upload is None:
-            raise DomainError("invalid_input", "Upload was not found or has already been consumed.")
+        upload = self.claim_upload(upload_id)
+        return await self.prepare_claimed_upload(upload, heap_dump_id)
+
+    async def prepare_claimed_upload(self, upload: Upload, heap_dump_id: str) -> PreparedDump:
+        """Prepare an upload already claimed by a background lifecycle task."""
         workspace = self._root / heap_dump_id
         try:
             return await asyncio.to_thread(self._prepare_dump_sync, upload, workspace)
@@ -115,7 +125,7 @@ class FileStorage:
         return workspace
 
     def _prepare_dump_sync(self, upload: Upload, workspace: Path) -> PreparedDump:
-        _, original_type = self._filename_and_type(upload.filename)
+        original_type = upload.original_type
         source = workspace / "source" / upload.filename
         hprof_path = workspace / "heap" / "heap.hprof"
         index_path = workspace / "indexes"
