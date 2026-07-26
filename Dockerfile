@@ -1,4 +1,4 @@
-FROM python:3.13-slim-trixie
+FROM python:3.14-slim-trixie
 
 ARG MAT_RELEASE=1.17.0
 ARG MAT_VERSION=1.17.0.20260601
