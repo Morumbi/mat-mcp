@@ -1,0 +1,26 @@
+name: Master
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+      - name: Test with coverage
+        run: uv run pytest --cov-report=xml:coverage.xml
+      - name: Build Docker image
+        run: docker build --tag mat-mcp:${{ github.sha }} .

@@ -2,5 +2,7 @@
 .runtime-check/
 __pycache__/
 .pytest_cache/
+.coverage
+coverage.xml
 .mypy_cache/
 .ruff_cache/

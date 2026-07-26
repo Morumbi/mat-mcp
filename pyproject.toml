@@ -20,6 +20,7 @@ dev = [
     "mypy>=1.17,<2",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.1,<2",
+    "pytest-cov>=6,<8",
     "ruff>=0.12,<1",
     "types-PyYAML>=6.0.12,<7",
 ]
@@ -40,6 +41,11 @@ packages = ["src/mat_mcp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--cov=mat_mcp --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["mat_mcp"]
 
 [tool.ruff]
 target-version = "py313"
