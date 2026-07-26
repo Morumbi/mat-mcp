@@ -6,7 +6,6 @@ Revises: 0002_heap_dump_upload_id
 
 from alembic import op
 
-
 revision = "0003_mat_query_queued_status"
 down_revision = "0002_heap_dump_upload_id"
 branch_labels = None

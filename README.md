@@ -21,7 +21,7 @@ runs MAT indexing in the background, and stores work files and metadata locally.
 ## Requirements
 
 - Python 3.13.
-- Java 17+.
+- Java 21+.
 - [Eclipse MAT](https://eclipse.dev/mat/)
 - Sufficient free disk space: while a plain HPROF is being prepared, both the source
   file and a MAT working copy are stored temporarily.
@@ -40,6 +40,42 @@ is `/health`.
 Settings are in `config/config.yaml`. Set `MAT_MCP_CONFIG` to use a different
 file. Nested settings can be overridden with environment variables such as
 `MAT_MCP_SERVER__PORT=8080`.
+
+### Environment variables
+
+Every setting from `config/config.yaml` can be overridden without changing the
+file. Use the `MAT_MCP_` prefix and separate nested keys with two underscores
+(`__`). Values are parsed as YAML, so numeric values do not need quotes.
+
+| Configuration key                        | Environment variable                              | Description                                                                         |
+|------------------------------------------|---------------------------------------------------|-------------------------------------------------------------------------------------|
+| Config file path                         | `MAT_MCP_CONFIG`                                  | Path to the YAML configuration file. Defaults to `config/config.yaml`.              |
+| `server.host`                            | `MAT_MCP_SERVER__HOST`                            | Network interface on which the HTTP server listens.                                 |
+| `server.port`                            | `MAT_MCP_SERVER__PORT`                            | TCP port for the HTTP server (1–65535).                                             |
+| `storage.root`                           | `MAT_MCP_STORAGE__ROOT`                           | Root directory for uploaded files and per-dump workspaces.                          |
+| `storage.database_path`                  | `MAT_MCP_STORAGE__DATABASE_PATH`                  | Path to the SQLite database that stores dump and query metadata.                    |
+| `heap_dump.max_size_bytes`               | `MAT_MCP_HEAP_DUMP__MAX_SIZE_BYTES`               | Maximum accepted upload size in bytes.                                              |
+| `heap_dump.ttl_seconds`                  | `MAT_MCP_HEAP_DUMP__TTL_SECONDS`                  | How long an inactive heap dump and its workspace are retained, in seconds.          |
+| `heap_dump.ttl_cleanup_interval_seconds` | `MAT_MCP_HEAP_DUMP__TTL_CLEANUP_INTERVAL_SECONDS` | Interval, in seconds, between expired-dump cleanup runs.                            |
+| `mat.executable_path`                    | `MAT_MCP_MAT__EXECUTABLE_PATH`                    | Path to the MAT launcher; `/opt/mat/ParseHeapDump.sh` in the Docker image.          |
+| `mat.max_heap`                           | `MAT_MCP_MAT__MAX_HEAP`                           | Maximum Java heap passed to each MAT process, for example `8g`.                     |
+| `mat.index_timeout_seconds`              | `MAT_MCP_MAT__INDEX_TIMEOUT_SECONDS`              | Maximum duration of initial MAT indexing, in seconds.                               |
+| `mat.query_timeout_seconds`              | `MAT_MCP_MAT__QUERY_TIMEOUT_SECONDS`              | Maximum duration of one MAT query, in seconds.                                      |
+| `mat.max_parallel_queries_per_dump`      | `MAT_MCP_MAT__MAX_PARALLEL_QUERIES_PER_DUMP`      | Maximum MAT queries allowed concurrently for one heap dump.                         |
+| `mat.max_result_rows`                    | `MAT_MCP_MAT__MAX_RESULT_ROWS`                    | Maximum rows returned for one query; from 1 to 50.                                  |
+| `mat.max_result_bytes`                   | `MAT_MCP_MAT__MAX_RESULT_BYTES`                   | Maximum UTF-8 JSON result size in bytes; from 1,024 to 262,144.                     |
+| `sqlite.busy_timeout_ms`                 | `MAT_MCP_SQLITE__BUSY_TIMEOUT_MS`                 | Time SQLite waits for a locked database before returning an error, in milliseconds. |
+
+For the Docker image, point the service at the MAT executable installed in the
+image:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e MAT_MCP_MAT__EXECUTABLE_PATH=/opt/mat/ParseHeapDump.sh \
+  -v "$PWD/config/config.yaml:/config/config.yaml:ro" \
+  -v mat-mcp-data:/data \
+  mat-mcp
+```
 
 ## Typical workflow
 
@@ -158,12 +194,14 @@ global-configuration options.
 
 ## Docker
 
-The image targets Linux and includes Java 17. Mount configuration and persistent data:
+The Linux image downloads Eclipse MAT 1.17.0 during the build and includes Java 21.
+Mount configuration and persistent data:
 
 ```bash
 docker build -t mat-mcp .
 docker run --rm -p 8000:8000 \
-  -v "$PWD/config/config.example.yaml:/config/config.yaml:ro" \
+  -e MAT_MCP_MAT__EXECUTABLE_PATH=/opt/mat/ParseHeapDump.sh \
+  -v "$PWD/config/config.yaml:/config/config.yaml:ro" \
   -v mat-mcp-data:/data \
   mat-mcp
 ```
@@ -173,5 +211,5 @@ docker run --rm -p 8000:8000 \
 ```bash
 uv run ruff check src tests migrations
 uv run mypy src
-uv run pytest
+uv run pytest --cov-report=xml:coverage.xml
 ```
