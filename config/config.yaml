@@ -12,7 +12,7 @@ heap_dump:
   ttl_cleanup_interval_seconds: 300
 
 mat:
-  executable_path: "./mat/win/ParseHeapDump.bat"
+  executable_path: <PATH_TO_MAT>
   max_heap: "8g"
   index_timeout_seconds: 900
   query_timeout_seconds: 300

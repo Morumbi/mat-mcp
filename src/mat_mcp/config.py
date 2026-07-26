@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 ENV_PREFIX = "MAT_MCP_"
-DEFAULT_CONFIG_PATH = Path("config/config.example.yaml")
+DEFAULT_CONFIG_PATH = Path("config/config.yaml")
 MAX_RESULT_ROWS = 50
 MAX_RESULT_BYTES = 256 * 1024
 
