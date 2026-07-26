@@ -27,6 +27,14 @@ class HeapDumpRepository:
             )
             return result
 
+    async def find_by_upload_id(self, upload_id: str) -> HeapDump | None:
+        """Find the active dump created from an idempotency upload key."""
+        async with self._sessions() as session:
+            result = await session.scalar(
+                select(HeapDump).where(HeapDump.upload_id == upload_id)
+            )
+            return result
+
     async def find_expired_ids(self, now: str) -> list[str]:
         """Return heap dumps whose fixed retention deadline has passed."""
         async with self._sessions() as session:

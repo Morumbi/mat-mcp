@@ -32,9 +32,17 @@ class HeapDumpService:
         self._indexer = indexer
         self._ttl_seconds = ttl_seconds
         self._preparation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._uploads: dict[str, HeapDump] = {}
 
     async def open_heap_dump(self, upload_id: str) -> dict[str, object]:
         """Consume an upload and schedule preparation independently of the client request."""
+        known_dump = self._uploads.get(upload_id)
+        if known_dump is not None:
+            return self._open_response(known_dump)
+        persisted_dump = await self._repository.find_by_upload_id(upload_id)
+        if persisted_dump is not None:
+            self._uploads[upload_id] = persisted_dump
+            return self._open_response(persisted_dump)
         heap_dump_id = f"hd_{uuid4().hex}"
         upload = self._storage.claim_upload(upload_id)
         now = utc_now()
@@ -45,6 +53,7 @@ class HeapDumpService:
         )
         dump = HeapDump(
             heap_dump_id=heap_dump_id,
+            upload_id=upload_id,
             content_sha256=f"preparing:{heap_dump_id}",
             status="indexing",
             filename=upload.filename,
@@ -63,7 +72,12 @@ class HeapDumpService:
             updated_at=now,
             expires_at=expires,
         )
-        await self._repository.add(dump)
+        self._uploads[upload_id] = dump
+        try:
+            await self._repository.add(dump)
+        except Exception:
+            self._uploads.pop(upload_id, None)
+            raise
         task = asyncio.create_task(
             self._prepare_and_start(dump, upload), name=f"prepare-{heap_dump_id}"
         )
@@ -155,6 +169,13 @@ class HeapDumpService:
                 "close_failed", "Heap dump resources could not be deleted.", retryable=True
             ) from error
         await self._repository.delete_by_id(heap_dump_id)
+        stale_upload_ids = [
+            upload_id
+            for upload_id, mapped_dump in self._uploads.items()
+            if mapped_dump.heap_dump_id == heap_dump_id
+        ]
+        for upload_id in stale_upload_ids:
+            self._uploads.pop(upload_id, None)
         return {"heap_dump_id": heap_dump_id, "closed": True, "deleted": True}
 
     @staticmethod

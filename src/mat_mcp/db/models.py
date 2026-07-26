@@ -33,6 +33,7 @@ class HeapDump(Base):
     )
 
     heap_dump_id: Mapped[str] = mapped_column(String, primary_key=True)
+    upload_id: Mapped[str | None] = mapped_column(String, unique=True)
     content_sha256: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     filename: Mapped[str] = mapped_column(String, nullable=False)

@@ -29,6 +29,11 @@ class FakeRepository:
     async def find_by_hash(self, _: str) -> HeapDump | None:
         return self.dump
 
+    async def find_by_upload_id(self, upload_id: str) -> HeapDump | None:
+        if self.dump is not None and self.dump.upload_id == upload_id:
+            return self.dump
+        return None
+
     async def add(self, dump: HeapDump) -> None:
         self.dump = dump
 
@@ -81,6 +86,23 @@ async def test_open_starts_indexing_and_exposes_status(tmp_path: Path) -> None:
     assert opened["status"] == "indexing"
     assert status["stage"] in {"Preparing heap dump", "Waiting for MAT indexing"}
     assert indexer.started
+
+
+async def test_repeated_open_returns_the_existing_heap_dump_id(tmp_path: Path) -> None:
+    storage = FileStorage(tmp_path, 1024)
+    upload = await storage.store_upload("heap.hprof", chunks(b"JAVA PROFILE 1.0.2\x00payload"))
+    repository = FakeRepository()
+    service = HeapDumpService(
+        storage,
+        cast(HeapDumpRepository, repository),
+        cast(IndexingService, FakeIndexer()),
+        ttl_seconds=60,
+    )
+
+    first = await service.open_heap_dump(upload.upload_id)
+    repeated = await service.open_heap_dump(upload.upload_id)
+
+    assert repeated == first
 
 
 async def test_close_removes_workspace_metadata_and_is_idempotent(tmp_path: Path) -> None:
