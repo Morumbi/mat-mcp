@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
@@ -42,6 +43,7 @@ class MatQueryService:
         dumps: HeapDumpRepository,
         queries: MatQueryRepository,
         max_result_bytes: int = MAX_RESULT_BYTES,
+        max_parallel_per_dump: int = 1,
     ) -> None:
         self._executable, self._max_heap, self._timeout, self._max_rows = (
             executable.resolve(),
@@ -51,6 +53,11 @@ class MatQueryService:
         )
         self._max_result_bytes = min(max_result_bytes, MAX_RESULT_BYTES)
         self._root, self._dumps, self._queries = root.resolve(), dumps, queries
+        self._max_parallel_per_dump = max_parallel_per_dump
+        self._semaphores: defaultdict[str, asyncio.Semaphore] = defaultdict(
+            lambda: asyncio.Semaphore(self._max_parallel_per_dump)
+        )
+        self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def run(
         self, heap_dump_id: str, operation: str, data: dict[str, object]
@@ -107,12 +114,80 @@ class MatQueryService:
             )
         request_data = self._canonical_json(data)
         request_hash = self._request_hash(dump.heap_dump_id, operation, request_data)
-        cached = await self._read_cache(dump, operation, data, request_data, request_hash)
-        if cached is not None:
-            return cached
-        return await self._execute(dump, operation, data, request_data, request_hash)
+        active = await self._queries.find_active(dump.heap_dump_id, request_hash)
+        if active is not None:
+            return self._submission(active)
+        cached = await self._queries.find_latest_completed(dump.heap_dump_id, request_hash)
+        if cached is not None and cached.result_path is not None:
+            return self._submission(cached, cache_hit=True)
+        return await self._submit(dump, operation, data, request_data, request_hash)
 
-    async def _execute(
+    async def get_status(self, query_id: str) -> dict[str, object]:
+        query = await self._queries.find_by_id(query_id)
+        if query is None:
+            raise DomainError("query_not_found", "MAT query was not found.")
+        return {
+            "query_id": query.query_id,
+            "heap_dump_id": query.heap_dump_id,
+            "operation": query.operation,
+            "status": query.status,
+            "cache_hit": bool(query.cache_hit),
+            "created_at": query.created_at,
+            "started_at": query.started_at,
+            "completed_at": query.completed_at,
+            "duration_ms": query.duration_ms,
+            "error": (
+                None
+                if query.error_code is None
+                else {
+                    "code": query.error_code,
+                    "message": query.error_message,
+                    "retryable": bool(query.error_retryable),
+                }
+            ),
+        }
+
+    async def get_result(self, query_id: str) -> dict[str, object]:
+        query = await self._queries.find_by_id(query_id)
+        if query is None:
+            raise DomainError("query_not_found", "MAT query was not found.")
+        if query.status != "completed" or query.result_path is None:
+            if query.status in {"queued", "running"}:
+                raise DomainError("query_not_ready", "MAT query is still running.", retryable=True)
+            raise DomainError(
+                query.error_code or "query_failed",
+                query.error_message or "MAT query failed.",
+                retryable=bool(query.error_retryable),
+            )
+        result_path = self._safe_storage_path(query.result_path)
+        if result_path is None or not result_path.is_file():
+            raise DomainError("query_result_unavailable", "MAT query result is unavailable.")
+        try:
+            result = await asyncio.to_thread(json.loads, result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise DomainError("query_result_unavailable", "MAT query result is unreadable.") from error
+        if not isinstance(result, dict):
+            raise DomainError("query_result_unavailable", "MAT query result is invalid.")
+        return result
+
+    async def stop(self) -> None:
+        """Cancel local work before an ASGI worker shuts down."""
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._queries.fail_incomplete(
+            "server_stopped", "MAT query was interrupted because the server stopped.", utc_now()
+        )
+
+    async def recover(self) -> None:
+        """Mark work left by a previous process as retryable failures."""
+        await self._queries.fail_incomplete(
+            "server_restarted", "MAT query was interrupted because the server restarted.", utc_now()
+        )
+
+    async def _submit(
         self,
         dump: HeapDump,
         operation: str,
@@ -120,9 +195,8 @@ class MatQueryService:
         request_data: str,
         request_hash: str,
     ) -> dict[str, object]:
-        query_id, started = f"qry_{uuid4().hex}", monotonic()
-        workspace = self._root / dump.storage_path
-        query_dir = workspace / "queries" / query_id
+        query_id = f"qry_{uuid4().hex}"
+        query_dir = self._root / dump.storage_path / "queries" / query_id
         await asyncio.to_thread(query_dir.mkdir, parents=True)
         request_path, stdout, stderr = (
             query_dir / "request.json",
@@ -133,60 +207,115 @@ class MatQueryService:
         await asyncio.to_thread(
             request_path.write_text, json.dumps(request, separators=(",", ":")), "utf-8"
         )
-        try:
-            with stdout.open("wb") as out, stderr.open("wb") as err:
-                process = await self._start_mat_process(
-                    dump, operation, data, query_dir, out, err
-                )
-                await asyncio.wait_for(process.wait(), self._timeout)
-            if process.returncode != 0:
-                raise DomainError("query_failed", f"MAT {operation} query failed.")
-            raw_path = self._report_path(dump, operation)
-            parser = self._PARSERS[operation]
-            parsed = await asyncio.to_thread(parser, self, raw_path)
-        except TimeoutError as error:
-            raise DomainError(
-                "query_failed", f"MAT {operation} query timed out.", retryable=True
-            ) from error
-        except OSError as error:
-            raise DomainError(
-                "query_failed", f"MAT {operation} query could not be started.", retryable=True
-            ) from error
-
-        metadata = cast(dict[str, object], parsed["metadata"])
-        metadata["cache_hit"] = False
-        metadata["execution_time_ms"] = int((monotonic() - started) * 1000)
-        self._apply_byte_limit(parsed)
-        result_path = query_dir / "result.json"
-        await asyncio.to_thread(
-            result_path.write_text, json.dumps(parsed, separators=(",", ":")), "utf-8"
-        )
         now = utc_now()
-        record = MatQuery(
+        query = MatQuery(
             query_id=query_id,
             heap_dump_id=dump.heap_dump_id,
             operation=operation,
             request_data_json=request_data,
             request_hash=request_hash,
-            status="completed",
+            status="queued",
             cache_hit=0,
             query_directory_path=self._relative(query_dir),
             request_path=self._relative(request_path),
             stdout_path=self._relative(stdout),
             stderr_path=self._relative(stderr),
-            raw_result_path=self._relative(raw_path),
-            result_path=self._relative(result_path),
-            total_rows=cast(int, metadata["total_rows"]),
-            returned_rows=cast(int, metadata["returned_rows"]),
-            truncated=int(cast(bool, metadata["truncated"])),
-            duration_ms=cast(int, metadata["execution_time_ms"]),
+            raw_result_path=None,
+            result_path=None,
+            total_rows=None,
+            returned_rows=None,
+            truncated=None,
+            duration_ms=None,
             created_at=now,
-            started_at=now,
-            completed_at=now,
+            started_at=None,
+            completed_at=None,
             updated_at=now,
         )
-        await self._queries.add(record)
-        return parsed
+        await self._queries.add(query)
+        task = asyncio.create_task(self._run_job(dump, operation, data, query_id), name=query_id)
+        self._tasks[query_id] = task
+        return self._submission(query)
+
+    async def _run_job(
+        self,
+        dump: HeapDump,
+        operation: str,
+        data: dict[str, object],
+        query_id: str,
+    ) -> None:
+        process: asyncio.subprocess.Process | None = None
+        started = monotonic()
+        try:
+            async with self._semaphores[dump.heap_dump_id]:
+                if not await self._queries.mark_running(query_id, utc_now()):
+                    return
+                query_dir = self._root / dump.storage_path / "queries" / query_id
+                stdout, stderr = query_dir / "stdout.log", query_dir / "stderr.log"
+                with stdout.open("wb") as out, stderr.open("wb") as err:
+                    process = await self._start_mat_process(dump, operation, data, query_dir, out, err)
+                    await asyncio.wait_for(process.wait(), self._timeout)
+                if process.returncode != 0:
+                    raise DomainError("query_failed", f"MAT {operation} query failed.")
+                raw_path = self._report_path(dump, operation)
+                parsed = await asyncio.to_thread(self._PARSERS[operation], self, raw_path)
+                metadata = cast(dict[str, object], parsed["metadata"])
+                metadata["cache_hit"] = False
+                metadata["execution_time_ms"] = int((monotonic() - started) * 1000)
+                self._apply_byte_limit(parsed)
+                result_path = query_dir / "result.json"
+                temporary_result_path = query_dir / "result.json.tmp"
+                await asyncio.to_thread(
+                    temporary_result_path.write_text,
+                    json.dumps(parsed, separators=(",", ":")),
+                    "utf-8",
+                )
+                await asyncio.to_thread(temporary_result_path.replace, result_path)
+                await self._queries.mark_completed(
+                    query_id,
+                    raw_result_path=self._relative(raw_path),
+                    result_path=self._relative(result_path),
+                    total_rows=cast(int, metadata["total_rows"]),
+                    returned_rows=cast(int, metadata["returned_rows"]),
+                    truncated=int(cast(bool, metadata["truncated"])),
+                    duration_ms=cast(int, metadata["execution_time_ms"]),
+                    completed_at=utc_now(),
+                )
+        except asyncio.CancelledError:
+            await self._terminate(process)
+            await self._queries.mark_failed(
+                query_id, "query_cancelled", "MAT query was cancelled.", True, utc_now()
+            )
+            raise
+        except TimeoutError:
+            await self._terminate(process)
+            await self._queries.mark_failed(
+                query_id, "query_timeout", f"MAT {operation} query timed out.", True, utc_now()
+            )
+        except DomainError as error:
+            await self._queries.mark_failed(
+                query_id, error.code, error.message, error.retryable, utc_now()
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            await self._terminate(process)
+            await self._queries.mark_failed(
+                query_id, "query_failed", f"MAT {operation} query failed: {error}", True, utc_now()
+            )
+        finally:
+            self._tasks.pop(query_id, None)
+
+    @staticmethod
+    async def _terminate(process: asyncio.subprocess.Process | None) -> None:
+        if process is not None and process.returncode is None:
+            process.terminate()
+            await process.wait()
+
+    @staticmethod
+    def _submission(query: MatQuery, cache_hit: bool | None = None) -> dict[str, object]:
+        return {
+            "query_id": query.query_id,
+            "status": query.status,
+            "cache_hit": bool(query.cache_hit) if cache_hit is None else cache_hit,
+        }
 
     async def _start_mat_process(
         self,

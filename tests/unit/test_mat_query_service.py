@@ -18,6 +18,9 @@ class CacheRepository:
     async def find_latest_completed(self, _: str, __: str) -> object:
         return self.cached
 
+    async def find_active(self, _: str, __: str) -> None:
+        return None
+
     async def add(self, query: object) -> None:
         self.records.append(query)
 
@@ -362,7 +365,7 @@ def test_list_objects_parser_reuses_oql_normalization(tmp_path: Path) -> None:
     assert result["rows"][0]["object_address"] == "0x802ec408"
 
 
-async def test_completed_query_result_is_reused_from_cache(tmp_path: Path) -> None:
+async def test_completed_query_is_returned_from_cache_as_a_completed_submission(tmp_path: Path) -> None:
     workspace = tmp_path / "hd_cached"
     result_path = workspace / "queries" / "qry_source" / "result.json"
     result_path.parent.mkdir(parents=True)
@@ -373,7 +376,10 @@ async def test_completed_query_result_is_reused_from_cache(tmp_path: Path) -> No
     )
     dump = SimpleNamespace(heap_dump_id="hd_cached", status="ready", storage_path="hd_cached")
     source = SimpleNamespace(
-        query_id="qry_source", result_path="hd_cached/queries/qry_source/result.json"
+        query_id="qry_source",
+        status="completed",
+        cache_hit=0,
+        result_path="hd_cached/queries/qry_source/result.json",
     )
     repository = CacheRepository(dump, source)
     service = MatQueryService(
@@ -388,14 +394,5 @@ async def test_completed_query_result_is_reused_from_cache(tmp_path: Path) -> No
 
     result = await service.run("hd_cached", "histogram", {})
 
-    metadata = cast(dict[str, object], result["metadata"])
-    assert metadata["total_rows"] == 0
-    assert metadata["returned_rows"] == 0
-    assert metadata["truncated"] is False
-    assert metadata["cache_hit"] is True
-    assert isinstance(metadata["execution_time_ms"], int)
-    assert len(repository.records) == 1
-    record = repository.records[0]
-    assert record.cache_hit == 1
-    assert record.cached_query_id == "qry_source"
-    assert record.result_path == "hd_cached/queries/qry_source/result.json"
+    assert result == {"query_id": "qry_source", "status": "completed", "cache_hit": True}
+    assert repository.records == []

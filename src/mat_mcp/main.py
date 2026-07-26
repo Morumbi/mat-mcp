@@ -57,8 +57,11 @@ def create_application(settings: Settings) -> Starlette:
         repository,
         query_repository,
         settings.mat.max_result_bytes,
+        settings.mat.max_parallel_queries_per_dump,
     )
-    return create_asgi_app(create_mcp_server(heap_dumps, queries), storage, ttl_cleanup)
+    return create_asgi_app(
+        create_mcp_server(heap_dumps, queries), storage, ttl_cleanup, mat_queries=queries
+    )
 
 
 def main() -> None:

@@ -130,9 +130,29 @@ def create_mcp_server(heap_dumps: HeapDumpService, queries: MatQueryService) -> 
         ],
         data: QueryData,
     ) -> dict[str, object]:
-        """Run a supported MAT query, report, or object listing."""
+        """Submit a supported MAT query and immediately return its query ID."""
         try:
             return await queries.run(heap_dump_id, operation, data)
+        except DomainError as error:
+            raise_tool_error(error)
+
+    @mcp.tool()
+    async def get_mat_query_status(
+        query_id: Annotated[str, Field(description="ID returned by run_mat_query")],
+    ) -> dict[str, object]:
+        """Return the state of a submitted MAT query."""
+        try:
+            return await queries.get_status(query_id)
+        except DomainError as error:
+            raise_tool_error(error)
+
+    @mcp.tool()
+    async def get_mat_query_result(
+        query_id: Annotated[str, Field(description="ID returned by run_mat_query")],
+    ) -> dict[str, object]:
+        """Return a completed MAT query result; retry while its status is pending."""
+        try:
+            return await queries.get_result(query_id)
         except DomainError as error:
             raise_tool_error(error)
 
@@ -140,7 +160,10 @@ def create_mcp_server(heap_dumps: HeapDumpService, queries: MatQueryService) -> 
 
 
 def create_asgi_app(
-    mcp: FastMCP, storage: FileStorage, ttl_cleanup: TtlCleanupService | None = None
+    mcp: FastMCP,
+    storage: FileStorage,
+    ttl_cleanup: TtlCleanupService | None = None,
+    mat_queries: MatQueryService | None = None,
 ) -> Starlette:
     """Expose only Streamable HTTP MCP plus the liveness endpoint."""
     mcp_app = mcp.http_app(path="/mcp")
@@ -148,6 +171,8 @@ def create_asgi_app(
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         async with mcp_app.lifespan(app):
+            if mat_queries is not None:
+                await mat_queries.recover()
             if ttl_cleanup is not None:
                 ttl_cleanup.start()
             try:
@@ -155,6 +180,8 @@ def create_asgi_app(
             finally:
                 if ttl_cleanup is not None:
                     await ttl_cleanup.stop()
+                if mat_queries is not None:
+                    await mat_queries.stop()
 
     return Starlette(
         routes=[

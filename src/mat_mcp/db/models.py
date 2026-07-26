@@ -70,7 +70,7 @@ class MatQuery(Base):
             name="ck_mat_queries_operation",
         ),
         CheckConstraint(
-            "status IN ('running', 'completed', 'failed')", name="ck_mat_queries_status"
+            "status IN ('queued', 'running', 'completed', 'failed')", name="ck_mat_queries_status"
         ),
         CheckConstraint("cache_hit IN (0, 1)", name="ck_mat_queries_cache_hit"),
         CheckConstraint(

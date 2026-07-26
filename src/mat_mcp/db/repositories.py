@@ -110,7 +110,7 @@ class HeapDumpRepository:
 
 
 class MatQueryRepository:
-    """Persists completed MAT query attempts."""
+    """Persists and tracks MAT query attempts."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = session_factory
@@ -118,6 +118,88 @@ class MatQueryRepository:
     async def add(self, query: MatQuery) -> None:
         async with self._sessions() as session:
             session.add(query)
+            await session.commit()
+
+    async def find_by_id(self, query_id: str) -> MatQuery | None:
+        async with self._sessions() as session:
+            return await session.get(MatQuery, query_id)
+
+    async def find_active(self, heap_dump_id: str, request_hash: str) -> MatQuery | None:
+        async with self._sessions() as session:
+            statement = (
+                select(MatQuery)
+                .where(
+                    MatQuery.heap_dump_id == heap_dump_id,
+                    MatQuery.request_hash == request_hash,
+                    MatQuery.status.in_(("queued", "running")),
+                )
+                .order_by(desc(MatQuery.created_at))
+            )
+            return cast(MatQuery | None, await session.scalar(statement))
+
+    async def mark_running(self, query_id: str, started_at: str) -> bool:
+        async with self._sessions() as session:
+            query = await session.get(MatQuery, query_id)
+            if query is None or query.status != "queued":
+                return False
+            query.status = "running"
+            query.started_at = query.updated_at = started_at
+            await session.commit()
+            return True
+
+    async def mark_completed(
+        self,
+        query_id: str,
+        *,
+        raw_result_path: str,
+        result_path: str,
+        total_rows: int,
+        returned_rows: int,
+        truncated: int,
+        duration_ms: int,
+        completed_at: str,
+    ) -> bool:
+        async with self._sessions() as session:
+            query = await session.get(MatQuery, query_id)
+            if query is None:
+                return False
+            query.status = "completed"
+            query.raw_result_path = raw_result_path
+            query.result_path = result_path
+            query.total_rows = total_rows
+            query.returned_rows = returned_rows
+            query.truncated = truncated
+            query.duration_ms = duration_ms
+            query.completed_at = query.updated_at = completed_at
+            await session.commit()
+            return True
+
+    async def mark_failed(
+        self, query_id: str, code: str, message: str, retryable: bool, completed_at: str
+    ) -> bool:
+        async with self._sessions() as session:
+            query = await session.get(MatQuery, query_id)
+            if query is None:
+                return False
+            query.status = "failed"
+            query.error_code = code
+            query.error_message = message
+            query.error_retryable = int(retryable)
+            query.completed_at = query.updated_at = completed_at
+            await session.commit()
+            return True
+
+    async def fail_incomplete(self, code: str, message: str, completed_at: str) -> None:
+        async with self._sessions() as session:
+            result = await session.scalars(
+                select(MatQuery).where(MatQuery.status.in_(("queued", "running")))
+            )
+            for query in result:
+                query.status = "failed"
+                query.error_code = code
+                query.error_message = message
+                query.error_retryable = 1
+                query.completed_at = query.updated_at = completed_at
             await session.commit()
 
     async def find_latest_completed(
